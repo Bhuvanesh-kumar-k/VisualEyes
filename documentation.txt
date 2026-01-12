@@ -1,0 +1,400 @@
+VISUAL PROJECT DOCUMENTATION
+=============================
+
+1. Overview
+-----------
+Visual is a Flutter-based Android application designed to assist blind or visually impaired users using **offline** speech and computer-vision capabilities, plus optional **online Gemini vision** for richer descriptions, and an optional **Exam Companion** desktop server.
+
+Key features:
+- Accessible initial setup screen with manual text entry for the user's name and a language chooser, followed by on-screen mode buttons for Visual, Road walk, ATM, and Exam modes.
+- Offline speech output (Text-to-Speech) and offline speech recognition using Vosk.
+- Visual guidance mode that uses the phone camera and Google ML Kit to describe nearby objects.
+- Specialized flavours of visual guidance for **Road walk mode** (outdoor/walking/road crossing) and **ATM mode** (ATM and money guidance), plus an **Exam mode** that connects the phone to a desktop/laptop exam computer over the local network.
+- Black, high-contrast UI that displays the last spoken sentences as text for sighted helpers.
+
+The project consists of two main parts:
+- **Mobile app** (Flutter/Dart) in the `visual/` directory.
+- **Exam Companion desktop server** (Python) in `visual/exam_companion/server.py`.
+
+2. Frontend (Flutter Mobile App)
+--------------------------------
+
+2.1 Technology stack
+- **Framework**: Flutter (Dart SDK ^3.10.4)
+- **Target platform**: Android (minSdkVersion = 30)
+- **State management**: `provider` + custom `AppState` class.
+- **Routing**: Single-screen app; `MyHomePage` returns `HomeScreen` as the root content.
+- **Permissions**: Runtime permissions managed via `permission_handler`.
+
+Main dependencies from `pubspec.yaml`:
+- `flutter_tts` – Text-to-Speech.
+- `vosk_flutter_2` – offline speech recognition using Vosk.
+- `camera` – camera access for visual guidance.
+- `google_ml_kit` – on-device object detection and OCR.
+- `google_generative_ai` – Gemini 2.0 Flash client for optional online image descriptions.
+- `web_socket_channel` – WebSocket client for Exam mode.
+- `permission_handler` – runtime permission requests for camera and microphone.
+- `shared_preferences` – local storage for user profile and exam server URL.
+- `provider` – dependency injection and state management.
+- `path_provider` – filesystem helpers (currently unused but available).
+
+2.2 Entry point and app setup
+- `lib/main.dart`
+  - Calls `WidgetsFlutterBinding.ensureInitialized()` then `runApp(const MyApp())`.
+  - Registers providers:
+    - `AppState` (ChangeNotifier)
+    - `SpeechService`
+    - `CameraService`
+    - `BackendService`
+    - `ExamModeService`
+  - `MaterialApp.home` → `MyHomePage` → `HomeScreen`.
+
+2.3 Initial setup screen (manual)
+- Implemented directly in `HomeScreen` using a text field and dropdown, instead of the previous voice-only onboarding.
+
+Steps:
+1. **Permissions and service init**
+   - As described above in `_init()`, the app requests microphone and camera permissions and initializes the speech and camera services.
+2. **Name entry**
+   - Shows a single-line text field labelled "Name" at the top of the screen.
+   - The user (or a sighted helper) types the user’s name.
+3. **Language selection (currently English-only)**
+   - Shows a small "Language" label with a dropdown.
+   - Currently only `en-IN` (English, India) is exposed, but the UI is ready to host additional language codes later.
+4. **Saving the profile**
+   - When the user taps **Save and continue**, the app:
+     - Calls `SpeechService.setLanguage(languageCode)`.
+     - Persists `username` and `languageCode` via `AppState.saveUser`.
+     - Speaks a short confirmation: `"Setup complete. You can now choose a mode."`.
+
+After this initial setup has run once, `AppState.isRegistered` is `true` and the app skips the setup form on future launches (it still shows the mode buttons and on-screen log).
+
+2.4 Returning user behaviour and mode launcher
+- For a saved user (`AppState.isRegistered == true`):
+  - The app greets the user with a short status message like `"Welcome back <username>. Choose a mode below."`.
+  - Under the title bar, the screen shows a row of large buttons:
+    - **Visual mode** – starts the general-purpose visual guidance.
+    - **Road walk mode** – starts guidance tuned for outdoor/road/crossing scenarios (re-using the same camera and backend pipeline as visual mode).
+    - **ATM mode** – starts guidance tuned for ATM/public kiosk and money-identification scenarios (also re-using visual guidance under the hood).
+    - **Exam mode** – opens the Exam Mode flow that connects to the desktop exam companion.
+
+The existing `_startGuidance()` implementation is reused for Visual, Road walk, and ATM modes, with a slightly different spoken introduction sentence for each mode to explain the context to the user.
+
+2.5 Voice interaction inside modes
+- After a mode is selected via the on-screen buttons, **interaction remains voice-driven**:
+  - Visual/Road/ATM guidance continuously speaks descriptions while listening for short voice commands to stop guidance or switch to exam mode.
+  - The transcription helper (`_handleTranscribe()`) captures surrounding speech and speaks it back.
+  - Exam mode uses TTS for prompts and listens for user responses (future work will add richer exam commands).
+
+2.6 Visual mode (guidance)
+- Implemented in `_startGuidance()`.
+- Behavior:
+  - If guidance already running, returns immediately.
+  - Sets `guidanceActive` flag in `AppState`.
+  - Speaks: `"Starting visual guidance. Say stop guidance to stop."`
+  - Uses `CameraService.startPeriodicCapture` to capture images every **5 seconds** (to respect Gemini free-tier limits when online).
+  - For each captured frame:
+    - Calls `BackendService.analyzeImage(path, languageCode, useGemini: AppConfig.geminiApiKey.isNotEmpty)`.
+    - If a non-empty `GEMINI_API_KEY` is provided at build/run time, the backend first tries a Gemini 2.0 Flash vision call with a prompt optimised for blind navigation, people description (including clothing and approximate age/gender), ATM/keypad guidance, and road-crossing safety. If that returns text, it is spoken.
+    - If Gemini is disabled, rate-limited, or fails for any reason, `analyzeImage` falls back to on-device ML Kit object detection. The ML Kit path now generates one short sentence per detected object that only describes **what** the object is (using cleaned labels like "a clothing item" or "a household item"), **where** it is (left/right/center), and **roughly how far** it is (very close / close / a few meters / far). These default descriptions do **not** mention the object’s purpose or exact size.
+    - If a non-empty description is returned and `_shouldSpeakDescription` decides it is not a near-duplicate of a recent description for the same position+distance, the app speaks it and logs it on screen.
+  - While running, also listens for short commands every few seconds:
+    - If user says `"stop guidance"`, `"stop"`, `"exit"`, `"back"`, or `"menu"` → stops guidance and returns to the main menu.
+    - If user says `"exam"` → stops guidance, announces that it is switching to exam mode, and calls `_startExamMode()`.
+    - If user says `"transcribe"` → calls `_handleTranscribe()`.
+  - On exit:
+    - Stops periodic capture.
+    - Clears `guidanceActive` flag.
+    - Speaks: `"Guidance stopped."`
+
+2.7 Transcription helper
+- Implemented in `_handleTranscribe()`.
+- Speaks: `"Listening to surrounding speech. Please speak now."`
+- Listens for up to ~8 seconds.
+- If text is empty: `"I could not understand the speech."`
+- Otherwise: says a short intro such as `"I heard the following speech."`, then reads the transcribed text aloud. The recognized speech itself appears in the on-screen log as a `user : ...` entry (see section 2.11).
+
+2.8 Exam mode (mobile side)
+- Implemented in `_startExamMode()` and uses `ExamModeService`.
+- Persistent exam server URL is managed in `AppState` via `examServerUrl` and `saveExamServerUrl`.
+
+Flow:
+1. If `examServerUrl` is not yet set, the app first tries an **automatic PC helper setup**:
+   - Starts a small HTTP server on the phone (using `dart:io`) bound to a random free port on all IPv4 interfaces.
+   - Discovers the phone's own local IPv4 address (for example `192.168.1.20`) by scanning network interfaces.
+   - Serves an embedded Windows helper executable `VisualEyesPC.exe` from a Flutter asset path (`assets/pc_helper/VisualEyesPC.exe`).
+   - Updates `_status` and the on-screen log with a message like:  
+     `"PC helper setup. Open this address in a browser on your computer: http://192.168.1.20:12345/VisualEyesPC.exe"`.
+   - Speaks a short instruction such as:  
+     `"PC mode first-time setup. On your computer, open a browser on the same Wi-Fi and type the address shown on the screen to download the VisualEyes PC helper."`
+   - When a PC downloads the file, the HTTP handler reads the **remote IP address** from the incoming request (for example `192.168.1.42`), treats this as the PC address, and stops the HTTP server.
+   - Saves `ws://<pc-ip>:8765` (e.g. `ws://192.168.1.42:8765`) as `examServerUrl` via `AppState.saveExamServerUrl`.
+   - Speaks a confirmation such as:  
+     `"I detected a computer at address 192.168.1.42. Please install and run the VisualEyes PC helper on that computer. When it is ready, double press volume up again to connect."`  
+     The first call to Exam/PC mode stops at this point so that the helper can be installed and started on the PC.
+
+2. If the automatic helper setup does **not** complete within the timeout (for example, no PC downloaded the file within ~10 minutes or the phone could not determine its own IP address), the app falls back to the original **manual IP entry** flow:
+   - Speaks:  
+     `"Automatic PC companion setup did not complete. I will ask you to enter the computer address manually."`
+   - Shows a modal dialog with a text field:
+     - Title: "Exam computer IP address".
+     - Hint: `"e.g. 192.168.0.10:8765 or ws://192.168.0.10:8765"`.
+   - If the user cancels or enters empty text, exam mode is canceled.
+   - Otherwise, the input is normalised:
+     - If it does not start with `ws://` or `wss://`, the code prepends `ws://`.
+     - If no port is present, it appends `:8765`.
+   - Stores the resulting URL via `AppState.saveExamServerUrl`.
+
+3. Once a URL is available (either from automatic helper setup or manual entry):
+   - Sets `examMode` flag in `AppState`.
+   - Calls `ExamModeService.connect(url)`.
+   - On success: `"Exam mode is ready. Your phone is now connected to the exam computer."`
+   - On exception:  
+     `"I could not connect to the exam computer. Please check the IP address and that the desktop companion is running."`
+
+**Note**: On the desktop side, the Python-based helper (`exam_companion/server.py`, packaged as `VisualEyesPC.exe`) now also offers a small GUI with Permanent/Temporary modes and shows the current PC WebSocket address. Actual voice commands to move the mouse, click, type, etc. from the mobile app are still planned but not fully wired up; the desktop server already supports the low-level JSON commands.
+
+2.9 Exit behavior
+- Implemented in `_exitApp()`.
+- Stops any current speech, then calls `SystemNavigator.pop()` to quit the app on Android.
+
+2.10 On-screen voice log and theme
+- The screen uses a **black background** with white text for high contrast.
+- `_speakLog` holds up to the **last 20 entries**.
+- Entries now include a simple timestamp suffix so that helpers can see when each line was produced. The most common formats are:
+  - `"visual : <text> : HH:mm.ss"` for lines spoken by the app (via `_say`).
+  - `"user : <text> : HH:mm.ss"` for lines recognized from the user’s speech (added in `_listenOnce`).
+  - `"visual (debug) : Gemini error: <details> : HH:mm.ss"` when a Gemini 2.0 Flash vision call fails (for example, because of quota or network errors). These debug lines are **not** spoken; they only appear in the on-screen log.
+- All normal speech in `HomeScreen` goes through `_say(text)`, which:
+  - Appends a `visual : ... : time` entry to `_speakLog` and trims older entries beyond 20.
+  - Updates `_status`.
+  - Calls `SpeechService.speak(text)`.
+- `_listenOnce()` parses the Vosk result, extracts the plain text, runs it through `_sanitizeRecognizedText` to remove echoes of the app’s own speech, and, if non-empty, appends a `user : ... : time` entry to `_speakLog`.
+- UI shows:
+  - Title "Visual" at the top.
+  - A scrollable list of recent log entries, newest at the top.
+  - If no log yet, shows `_status` or "Visual is running" centered.
+
+3. Speech subsystem (SpeechService)
+-----------------------------------
+- File: `lib/services/speech_service.dart`.
+- Uses:
+  - `flutter_tts` for Text-to-Speech output.
+  - `vosk_flutter_2` for offline speech recognition.
+
+Key points:
+- `init({String? languageCode})`:
+  - Sets TTS language (if provided) and speech rate.
+  - Loads the **small** Vosk model:
+    - `assets/models/vosk-model-small-en-us-0.15.zip` via `ModelLoader.loadFromAssets`.
+  - Creates a Vosk model and recognizer (16 kHz sample rate).
+  - Starts a Vosk speech service.
+- `startListening(onResult, {localeId, listenFor})`:
+  - If already listening, returns.
+  - Subscribes to service `onResult()` → forwards recognized text to callback and stops listening.
+  - Subscribes to `onPartial()` but ignores partial text.
+  - Starts capturing audio.
+  - If `listenFor` is set, schedules a timeout that calls `stopListening()`.
+- `stopListening()` stops the Vosk service and cancels subscriptions.
+
+**Important**: `HomeScreen._listenOnce()` additionally tries to parse the recognition result as JSON and extract `{"text": "..."}` so that usernames and commands are plain text, not JSON strings.
+
+4. Camera and vision backend
+-----------------------------
+
+4.1 CameraService
+- File: `lib/services/camera_service.dart`.
+- Uses the `camera` package.
+- Responsibilities:
+  - Selects the back-facing camera if available (fallback to first camera).
+  - Initializes `CameraController` with `ResolutionPreset.medium` and `enableAudio: false`.
+  - Provides `startPeriodicCapture(interval, onFrame)`:
+    - Every `interval`, takes a picture if not already capturing and controller is initialized.
+    - Calls `onFrame(XFile)` with the captured image.
+  - Provides `stopPeriodicCapture()` and `dispose()`.
+
+4.2 BackendService (vision, OCR, Gemini, and stubs)
+- File: `lib/services/backend_service.dart`.
+- Uses `google_ml_kit` for on-device object detection/OCR and `google_generative_ai` for optional Gemini 2.0 Flash vision.
+
+Implemented methods:
+- `analyzeImage(imagePath, languageCode, {bool useGemini = false})`:
+  - If `useGemini` is `true` and a non-empty `AppConfig.geminiApiKey` is available, it first calls a private `_analyzeImageWithGemini` helper which:
+    - Constructs a `GenerativeModel` with `AppConfig.geminiVisionModel` (currently `"gemini-2.0-flash"`).
+    - Reads the image bytes and sends them with a prompt tailored for blind navigation, ATM/keypad guidance, and road-crossing safety.
+    - Returns Gemini’s text response (trimmed) if available.
+  - If Gemini is disabled or returns an empty string (e.g., rate limit, network error), it falls back to on-device ML Kit:
+    - Loads the image from disk using `dart:io` and `dart:ui`.
+    - Uses ML Kit `ObjectDetector` (single-image mode, multi-object, classification enabled).
+    - For each detected object:
+      - Derives bounding box position relative to the image.
+      - Estimates:
+        - Left/center/right (`"on your left"`, `"on your right"`, `"in front of you"`).
+        - Approximate distance (`"very close, within half a meter"`, `"close, around one meter away"`, `"a few meters away"`, `"far away"`) based on bounding box size.
+      - Uses the highest-confidence label text if available, or `"an object"` otherwise.
+    - Builds short descriptions like:  
+      `"I see a chair in front of you, a few meters away."` or  
+      `"I see an object on your right, very close, within half a meter."`  
+    - **By default, these descriptions do not mention the object’s purpose or relative size.**
+    - The service also remembers the largest detected object from the last frame so that follow-up questions can refer to it.
+- `describeLastObjectUsage(languageCode)`:
+  - Looks at the last main object detected by `analyzeImage`.
+  - If the label is known (chair, door, stairs, bottle, cup, laptop, etc.), returns a **single, short usage sentence** such as:  
+    `"It is a chair, mainly used for sitting."`
+  - If the label is unknown but a Gemini API key is configured, calls Gemini 2.0 Flash (text-only) with a prompt like:  
+    `"A blind user is asking what a <label> is usually used for."`  
+    and asks for **1–2 short sentences** in the user’s language.
+  - Returns an empty string if no information is available.
+- `describeLastObjectSize(languageCode)`:
+  - Uses the relative size estimated from the bounding box to answer follow-up size questions with a very short sentence, such as:  
+    `"The object looks large compared to your view."` or `"The object looks small compared to your view."`
+
+- `ocrScreen(imagePath, languageCode)`:
+  - Uses ML Kit `TextRecognizer` with Latin script to read text from the image.
+  - Returns the recognized text string.
+
+Stubbed (placeholders for future offline ML integrations):
+- `transcribeAndTranslate(languageCode, audioPath)` – currently returns empty string.
+- `enrollVoice(username, languageCode, audioPath)` – currently always returns `true`.
+- `verifyVoice(username, audioPath)` – currently always returns `true`.
+
+5. State management and persistence
+-----------------------------------
+- File: `lib/state/app_state.dart`.
+- `AppState` extends `ChangeNotifier` and is provided at the root via `ChangeNotifierProvider`.
+
+Fields:
+- `_username` – stored username (nullable).
+- `_languageCode` – default `en-IN`.
+- `_registered` – whether a user profile exists.
+- `_guidanceActive` – whether visual guidance is running.
+- `_examMode` – whether exam mode is active.
+- `_examServerUrl` – persisted WebSocket URL for desktop exam server.
+- `_useGeminiVision` – legacy flag intended to control whether visual guidance should prefer Gemini-based image descriptions when an API key is configured. The current `HomeScreen` implementation instead simply checks whether `GEMINI_API_KEY` is non-empty and, if so, always prefers Gemini 2.0 Flash for guidance.
+- `_visionEngine` – string flag (`"mlkit"`, `"local_ai"`, or `"gemini"`) intended to capture the user’s preferred image-description engine (on-device ML Kit only, a future Local AI server on the same Wi‑Fi network, or Gemini 2.0 Flash). The UI-level dropdown is planned but not yet fully wired in.
+- `_visionServerUrl` – optional HTTP base URL for the future Local AI server (for example, `http://192.168.0.50:8000`).
+
+Persistence:
+- `load()` reads from `SharedPreferences` (keys: `username`, `languageCode`, `examServerUrl`, `useGeminiVision`, `visionEngine`, `visionServerUrl`).
+- `saveUser(username, languageCode)` writes to `SharedPreferences` and marks `_registered = true`.
+- `saveExamServerUrl(url)` writes `examServerUrl` key.
+- `setUseGeminiVision(bool)` updates the Gemini preference and persists `useGeminiVision`.
+- `saveVisionEngine(engine)` updates the future image-description engine preference and persists `visionEngine`.
+- `saveVisionServerUrl(url)` stores the Local AI server base URL under `visionServerUrl`.
+- `setGuidanceActive(active)` and `setExamMode(enabled)` update flags and notify listeners.
+
+6. Exam Companion Desktop Server
+--------------------------------
+- File: `exam_companion/server.py`.
+- Language: Python (recommended Python 3.10+).
+
+Dependencies (inferred from imports):
+- `pyautogui` – simulate mouse and keyboard events.
+- `websockets` – async WebSocket server.
+- `mss` – screen capture.
+- `Pillow` (PIL) – image processing.
+
+Server details:
+- Binds to `HOST = "0.0.0.0"`, `PORT = 8765`.
+- Uses `websockets.serve(handle_client, HOST, PORT)` to accept connections.
+- For each connected client (i.e., the mobile app), `handle_client` listens for JSON messages of the form:
+  - `{"type": "click", "x": <int>, "y": <int>}` → `pyautogui.click(x, y)`.
+  - `{"type": "move", "x": <int>, "y": <int>}` → `pyautogui.moveTo(x, y)`.
+  - `{"type": "type_text", "text": "some text"}` → `pyautogui.typewrite(text)`.
+  - `{"type": "key", "key": "enter"}` → `pyautogui.press(key)`.
+  - `{"type": "screenshot"}` → captures full-screen screenshot and returns a JSON message:  
+    `{"type": "screenshot", "data": "<base64 JPEG>"}`.
+
+Usage pattern:
+- The invigilator or operator runs the Python script (or a packaged `.exe`) on the exam computer.
+- The mobile app connects via WebSocket to `ws://<exam-computer-ip>:8765` using the URL collected from the user.
+- Future enhancements can convert voice commands from the app into these JSON control messages to manipulate the computer during exams.
+
+7. Android configuration
+------------------------
+- Manifest: `android/app/src/main/AndroidManifest.xml`.
+- Requested permissions:
+  - `INTERNET`
+  - `CAMERA`
+  - `RECORD_AUDIO`
+  - `WAKE_LOCK`
+  - `FOREGROUND_SERVICE`
+- MainActivity is exported and uses the standard Flutter embedding (`flutterEmbedding = 2`).
+- A `<queries>` section is included to allow text-processing intents used by Flutter engine.
+
+Build configuration:
+- `android/app/build.gradle.kts`:
+  - `compileSdk = flutter.compileSdkVersion`.
+  - `minSdk = 30` (raised to satisfy `vosk_flutter_2` requirements).
+  - `targetSdk = flutter.targetSdkVersion`.
+  - Uses Java 17 and Kotlin JVM target 17.
+- ProGuard / R8 rules: `android/app/proguard-rules.pro`:
+  - Keeps `com.sun.jna.*` classes for Vosk/JNA.
+  - `-dontwarn` rules for optional ML Kit language-specific classes and `java.awt.*` (used by JNA AWT helpers but not needed on Android).
+
+8. Assets
+---------
+- `assets/models/vosk-model-small-en-us-0.15.zip` – small Vosk English speech-recognition model.
+- Declared in `pubspec.yaml` under `flutter.assets`.
+
+9. Tools and build instructions
+--------------------------------
+
+9.1 Required tools
+- Flutter SDK compatible with Dart ^3.10.4.
+- Android SDK with API level matching `compileSdkVersion` (via `flutter doctor`).
+- For the desktop exam companion:
+  - Python 3.10+.
+  - Python packages: `pyautogui`, `websockets`, `mss`, `Pillow`.
+
+9.2 Building the Android release APK
+From the `visual/` directory:
+
+1. Get dependencies:
+   - `flutter pub get`
+2. Clean previous builds:
+   - `flutter clean`
+3. Build release APK (ML Kit only, no Gemini):
+   - `flutter build apk --release`
+
+To enable Gemini 2.0 Flash in a build, pass the API key via a Dart define (never hardcode it in source control):
+
+- Example (debug run on a connected Android device):
+  - `flutter run -d <device_id> --dart-define=GEMINI_API_KEY=your_real_key_here`
+- Example (release build with Gemini enabled):
+  - `flutter build apk --release --dart-define=GEMINI_API_KEY=your_real_key_here`
+
+If the configured Gemini project has no quota (for example, a free-tier project with limit 0 for `gemini-2.0-flash`), the app will log a `visual (debug) : Gemini error: ...` line on screen and automatically fall back to ML Kit object descriptions for each frame.
+
+The resulting APK will be in `build/app/outputs/flutter-apk/app-release.apk`.
+
+9.3 Planned Local AI server (future free alternative to Gemini)
+---------------------------------------------------------------
+In addition to on-device ML Kit and optional Gemini 2.0 Flash, the project design includes a **future Local AI server** that can run on a Windows or Linux machine on the same Wi‑Fi network as the phone. This backend is intended to:
+
+- Run YOLOv8 (e.g., `yolov8n`) for object and person detection with bounding boxes.
+- Use EasyOCR to read text from captured images.
+- Use a small BLIP‑2 or LLaVA caption model (via Hugging Face) to generate natural-language scene descriptions.
+- Expose a simple HTTP endpoint, for example `POST /describe`, that accepts an image and returns JSON containing:
+  - Detected objects with positions, approximate sizes, and distances.
+  - Any recognized text blocks.
+  - A short natural-language caption suitable for TTS.
+
+On the mobile side, `AppState.visionEngine` and `visionServerUrl` are reserved for this future integration. Once implemented, the user will be able to choose between **On-device ML Kit**, **Local AI server**, and **Gemini 2.0 Flash** for image descriptions, with ML Kit remaining the offline fallback if the network backend is unavailable.
+
+10. Current limitations and TODOs
+---------------------------------
+- Speech recognition and TTS are currently **English-only** (`en-IN`), though the Gemini prompt can optionally answer in simple Tamil based on language code.
+- Voice-based speaker verification and enrollment are stubbed in `BackendService`.
+- Exam mode on the mobile side does not yet send detailed control commands; the server is ready to receive `click`, `move`, `type_text`, and `key` messages.
+- OCR (`ocrScreen`) is not yet integrated into a full user-facing flow.
+- No iOS build configuration has been created or tested.
+- Advanced navigation scenarios (precise ATM keypad finger tracking, robust road-crossing assistance with live speed estimation, public kiosk/indoor navigation, etc.) are design goals but not yet fully implemented; current Gemini prompts encourage this behaviour where possible, but results must be treated as assistance, not guaranteed safety.
+
+This document reflects the state of the project after integrating:
+- Offline Vosk small model for speech recognition.
+- A simplified manual initial setup screen with text entry for the user's name and a language chooser, instead of the previous fully voice-only onboarding.
+- A button-based mode launcher offering Visual mode, Road walk mode, ATM mode, and Exam mode, with voice interaction still used inside each mode.
+- High-contrast UI with a log of the last 20 `visual : ...` / `user : ...` entries.
+- Runtime-configurable exam server URL stored in `SharedPreferences`.
+- Optional Gemini 2.0 Flash vision integration, driven by a `GEMINI_API_KEY` Dart define and rate-limited to at most one request every 5 seconds.
