@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 
@@ -23,6 +24,18 @@ class _LogEntry {
     required this.isUser,
     required this.text,
     required this.time,
+  });
+}
+
+class _ImageContextEntry {
+  final String imagePath;
+  final String description;
+  final DateTime timestamp;
+
+  const _ImageContextEntry({
+    required this.imagePath,
+    required this.description,
+    required this.timestamp,
   });
 }
 
@@ -51,7 +64,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String _selectedLanguageCode = 'en-IN';
   static const int _descriptionSuppressSeconds = 20;
   final Map<String, DateTime> _recentDescriptions = {};
-  bool _showText = false;
+  bool _showText = true;
   static const List<String> _modeOrder = [
     'visual',
     'road',
@@ -60,6 +73,12 @@ class _HomeScreenState extends State<HomeScreen> {
     'translate',
   ];
   int _selectedModeIndex = 0;
+
+  String? _activeMode; // visual, road, atm, exam, translate
+  final List<_ImageContextEntry> _recentImageContexts = [];
+  bool _questionModeActive = false;
+  String? _lastModeBeforeQuestion;
+  bool _editingProfile = false;
 
   HttpServer? _pcHelperServer;
   String? _pcHelperServerAddress;
@@ -259,46 +278,32 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!_hasMicPermission) {
       return;
     }
-
-    if (_guidanceRunning) {
-      _guidanceRunning = false;
+    if (_activeMode != null) {
+      await _stopCurrentMode();
       return;
     }
 
-    final mode = _modeOrder[_selectedModeIndex];
-    if (mode == 'visual') {
-      await _startGuidance();
-    } else if (mode == 'road') {
-      await _startRoadMode();
-    } else if (mode == 'atm') {
-      await _startAtmMode();
-    } else if (mode == 'exam') {
-      await _toggleExamMode();
-    } else if (mode == 'translate') {
-      await _startTranslateInteraction();
-    }
+    await _startSelectedMode();
   }
 
   Future<void> _onVolumeUpTriple() async {
     if (!_app.isRegistered) {
       return;
     }
+    await _stopCurrentMode();
     setState(() {
       _selectedModeIndex = (_selectedModeIndex + 1) % _modeOrder.length;
     });
-    await _announceSelectedMode();
+    await _startSelectedMode();
   }
 
   Future<void> _onVolumeDownDouble() async {
     if (!_hasMicPermission) {
       return;
     }
-    final mode = _modeOrder[_selectedModeIndex];
-    if (mode == 'translate') {
-      await _startTranslateInteraction();
-    } else {
-      await _handleTranscribe();
-    }
+    final previousMode = _activeMode;
+    await _stopCurrentMode();
+    await _startQuestionMode(previousMode: previousMode);
   }
 
   Future<void> _announceSelectedMode() async {
@@ -346,6 +351,178 @@ class _HomeScreenState extends State<HomeScreen> {
       _status = 'Setup complete. Choose a mode below.';
     });
     await _say('Setup complete. You can now choose a mode.');
+  }
+
+  Future<void> _saveProfileChanges() async {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
+      setState(() {
+        _status = 'Please enter your name to continue.';
+      });
+      await _say('Please enter your name to continue.');
+      return;
+    }
+    final languageCode = _selectedLanguageCode;
+    await _speech.setLanguage(languageCode);
+    await _app.saveUser(name, languageCode);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _editingProfile = false;
+      _status = 'Profile updated.';
+    });
+    await _say('Your profile has been updated.');
+  }
+
+  Future<void> _startSelectedMode() async {
+    final mode = _modeOrder[_selectedModeIndex];
+    if (mode == 'visual') {
+      await _startGuidance();
+    } else if (mode == 'road') {
+      await _startRoadMode();
+    } else if (mode == 'atm') {
+      await _startAtmMode();
+    } else if (mode == 'exam') {
+      await _toggleExamMode();
+    } else if (mode == 'translate') {
+      await _startTranslateInteraction();
+    }
+  }
+
+  Future<void> _stopCurrentMode() async {
+    final mode = _activeMode;
+    if (mode == null) {
+      return;
+    }
+
+    await _speech.stopSpeaking();
+
+    if (mode == 'visual' || mode == 'road' || mode == 'atm') {
+      // Let the running guidance loop see this flag and cleanly stop,
+      // including stopping camera capture and announcing that guidance
+      // has stopped.
+      _guidanceRunning = false;
+    } else if (mode == 'exam') {
+      if (_app.examModeEnabled) {
+        await _exam.disconnect();
+        _app.setExamMode(false);
+        await _say('Exam mode stopped.');
+      }
+    } else if (mode == 'translate') {
+      await _speech.stopSpeaking();
+    }
+
+    _activeMode = null;
+  }
+
+  void _storeImageContext(String imagePath, String description) {
+    final trimmed = description.trim();
+    if (trimmed.isEmpty) {
+      return;
+    }
+    _recentImageContexts.add(
+      _ImageContextEntry(
+        imagePath: imagePath,
+        description: trimmed,
+        timestamp: DateTime.now(),
+      ),
+    );
+    if (_recentImageContexts.length > 4) {
+      final toRemoveCount = _recentImageContexts.length - 4;
+      final removed = _recentImageContexts.sublist(0, toRemoveCount);
+      for (final entry in removed) {
+        try {
+          final file = File(entry.imagePath);
+          if (file.existsSync()) {
+            file.deleteSync();
+          }
+        } catch (_) {}
+      }
+      _recentImageContexts.removeRange(0, toRemoveCount);
+    }
+  }
+
+  Future<Position?> _tryGetLocation() async {
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        return null;
+      }
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          return null;
+        }
+      }
+      if (permission == LocationPermission.deniedForever) {
+        return null;
+      }
+      return await Geolocator.getCurrentPosition();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _startQuestionMode({String? previousMode}) async {
+    if (_questionModeActive) {
+      return;
+    }
+    _questionModeActive = true;
+    _lastModeBeforeQuestion = previousMode;
+
+    await _speech.stopSpeaking();
+    await _say(
+      'Question mode. You can ask about the last images or any general question. Please speak now.',
+    );
+
+    final question = await _listenOnce(timeout: const Duration(seconds: 10));
+    if (question.isEmpty) {
+      await _say('I did not hear a clear question.');
+      _questionModeActive = false;
+      final mode = _lastModeBeforeQuestion;
+      _lastModeBeforeQuestion = null;
+      if (mode != null) {
+        _selectMode(mode);
+        await _startSelectedMode();
+      }
+      return;
+    }
+
+    final imagePaths = _recentImageContexts
+        .map((e) => e.imagePath)
+        .toList(growable: false);
+
+    Position? position;
+    final locationStatus = await Permission.locationWhenInUse.request();
+    if (locationStatus.isGranted) {
+      position = await _tryGetLocation();
+    }
+
+    final answer = await _backend.answerQuestionWithGemini(
+      question: question,
+      languageCode: _app.languageCode,
+      imagePaths: imagePaths,
+      latitude: position?.latitude,
+      longitude: position?.longitude,
+    );
+
+    if (answer.isEmpty) {
+      await _say(
+        'I could not find a clear answer. Please try capturing a new image and ask again.',
+      );
+    } else {
+      await _say(answer);
+    }
+
+    _questionModeActive = false;
+    final mode = _lastModeBeforeQuestion;
+    _lastModeBeforeQuestion = null;
+    if (mode != null) {
+      _selectMode(mode);
+      await _startSelectedMode();
+    }
   }
 
   String _sanitizeRecognizedText(String text) {
@@ -505,9 +682,16 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startGuidance({String? intro}) async {
+    if (_app.examModeEnabled) {
+      await _say(
+        'Exam or PC mode is active. Please exit exam mode before using camera guidance modes.',
+      );
+      return;
+    }
     if (_guidanceRunning) {
       return;
     }
+    _activeMode ??= 'visual';
     _guidanceRunning = true;
     _app.setGuidanceActive(true);
     await _say(
@@ -518,8 +702,6 @@ class _HomeScreenState extends State<HomeScreen> {
       final description = await _backend.analyzeImage(
         file.path,
         _app.languageCode,
-        // If a Gemini API key is configured, always prefer Gemini 2.0 Flash
-        // for guidance descriptions.
         useGemini: AppConfig.geminiApiKey.isNotEmpty,
       );
 
@@ -537,8 +719,11 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
 
-      if (description.isNotEmpty && _shouldSpeakDescription(description)) {
-        await _say(description);
+      if (description.isNotEmpty) {
+        _storeImageContext(file.path, description);
+        if (_shouldSpeakDescription(description)) {
+          await _say(description);
+        }
       }
     });
 
@@ -590,9 +775,13 @@ class _HomeScreenState extends State<HomeScreen> {
     await _camera.stopPeriodicCapture();
     _app.setGuidanceActive(false);
     await _say('Guidance stopped.');
+    if (_activeMode == 'visual' || _activeMode == 'road' || _activeMode == 'atm') {
+      _activeMode = null;
+    }
   }
 
   Future<void> _startRoadMode() async {
+    _activeMode = 'road';
     await _startGuidance(
       intro:
           'Starting road walk mode. I will guide you while walking on the road and crossing the road. Say stop guidance to stop.',
@@ -600,6 +789,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startAtmMode() async {
+    _activeMode = 'atm';
     await _startGuidance(
       intro:
           'Starting ATM mode. I will help you understand the ATM and identify money notes and coins. Say stop guidance to stop.',
@@ -618,6 +808,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startTranslateInteraction() async {
+    if (_app.examModeEnabled) {
+      await _say(
+        'Exam or PC mode is active. Please exit exam mode before using translate mode.',
+      );
+      return;
+    }
+    _activeMode = 'translate';
     await _say('Translate mode. Please speak a short sentence to translate.');
     final text = await _listenOnce(timeout: const Duration(seconds: 8));
     if (text.isEmpty) {
@@ -630,6 +827,9 @@ class _HomeScreenState extends State<HomeScreen> {
       await _say('I could not translate the speech.');
     } else {
       await _say(translated);
+    }
+    if (_activeMode == 'translate') {
+      _activeMode = null;
     }
   }
 
@@ -798,6 +998,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startExamMode() async {
+    // Ensure any running camera-based guidance is fully stopped before
+    // entering exam/PC mode.
+    _guidanceRunning = false;
+    await _camera.stopPeriodicCapture();
+    _app.setGuidanceActive(false);
+
     String? url = _app.examServerUrl;
     if (url == null) {
       final autoUrl = await _runPcHelperSetup();
@@ -836,6 +1042,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     _app.setExamMode(true);
+    _activeMode = 'exam';
     try {
       _exam.connect(url!);
       await _say(
@@ -853,6 +1060,9 @@ class _HomeScreenState extends State<HomeScreen> {
       await _exam.disconnect();
       _app.setExamMode(false);
       await _say('Exam mode stopped.');
+      if (_activeMode == 'exam') {
+        _activeMode = null;
+      }
     } else {
       await _startExamMode();
     }
@@ -955,7 +1165,19 @@ class _HomeScreenState extends State<HomeScreen> {
                       items: const [
                         DropdownMenuItem(
                           value: 'en-IN',
-                          child: Text('English (India)'),
+                          child: Text('English'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'ta-IN',
+                          child: Text('Tamil'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'ml-IN',
+                          child: Text('Malayalam'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'hi-IN',
+                          child: Text('Hindi'),
                         ),
                       ],
                       onChanged: (value) {
@@ -976,15 +1198,96 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 16),
               ] else ...[
-                if (_app.username != null)
-                  Text(
-                    'Welcome ${_app.username}',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    if (_app.username != null)
+                      Text(
+                        'Welcome ${_app.username}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                        ),
+                      ),
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          _editingProfile = !_editingProfile;
+                          _nameController.text = _app.username ?? '';
+                          _selectedLanguageCode = _app.languageCode;
+                        });
+                      },
+                      child: Text(
+                        _editingProfile ? 'Cancel edit' : 'Edit profile',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ),
+                  ],
+                ),
+                if (_editingProfile) ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _nameController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: const InputDecoration(
+                      labelText: 'Name',
+                      labelStyle: TextStyle(color: Colors.white),
+                      enabledBorder: OutlineInputBorder(
+                        borderSide: BorderSide(color: Colors.white),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderSide: BorderSide(color: Colors.blue),
+                      ),
                     ),
                   ),
-                const SizedBox(height: 8),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      const Text(
+                        'Language:',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                      const SizedBox(width: 12),
+                      DropdownButton<String>(
+                        value: _selectedLanguageCode,
+                        dropdownColor: Colors.black,
+                        style: const TextStyle(color: Colors.white),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'en-IN',
+                            child: Text('English'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'ta-IN',
+                            child: Text('Tamil'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'ml-IN',
+                            child: Text('Malayalam'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'hi-IN',
+                            child: Text('Hindi'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) {
+                            return;
+                          }
+                          setState(() {
+                            _selectedLanguageCode = value;
+                          });
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  ElevatedButton(
+                    onPressed: _saveProfileChanges,
+                    child: const Text('Save profile'),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 LayoutBuilder(
                   builder: (context, constraints) {
                     final buttonWidth = (constraints.maxWidth - 12) / 2;

@@ -33,12 +33,11 @@ class MainActivity : FlutterActivity() {
         when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_UP -> {
                 handleVolumeUp()
-                // Consume the event so the system does not change the volume.
-                return true
+                return super.onKeyDown(keyCode, event)
             }
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
                 handleVolumeDown()
-                return true
+                return super.onKeyDown(keyCode, event)
             }
         }
         return super.onKeyDown(keyCode, event)

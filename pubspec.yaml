@@ -45,6 +45,7 @@ dependencies:
   path_provider: ^2.1.4
   google_generative_ai: ^0.4.7
   http: ^1.2.2
+  geolocator: ^11.0.0
 
 dev_dependencies:
   flutter_test:

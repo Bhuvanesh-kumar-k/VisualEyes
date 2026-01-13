@@ -58,16 +58,21 @@ Steps:
 2. **Name entry**
    - Shows a single-line text field labelled "Name" at the top of the screen.
    - The user (or a sighted helper) types the user’s name.
-3. **Language selection (currently English-only)**
-   - Shows a small "Language" label with a dropdown.
-   - Currently only `en-IN` (English, India) is exposed, but the UI is ready to host additional language codes later.
+3. **Language selection (English, Tamil, Malayalam, Hindi)**
+- Shows a small "Language" label with a dropdown.
+- The dropdown currently exposes four language codes:
+  - `en-IN` – English.
+  - `ta-IN` – Tamil.
+  - `ml-IN` – Malayalam.
+  - `hi-IN` – Hindi.
+  The selected language is used for **Text-to-Speech** output and to steer Gemini prompts so that online responses are spoken back in the chosen language when possible.
 4. **Saving the profile**
    - When the user taps **Save and continue**, the app:
      - Calls `SpeechService.setLanguage(languageCode)`.
      - Persists `username` and `languageCode` via `AppState.saveUser`.
      - Speaks a short confirmation: `"Setup complete. You can now choose a mode."`.
 
-After this initial setup has run once, `AppState.isRegistered` is `true` and the app skips the setup form on future launches (it still shows the mode buttons and on-screen log).
+After this initial setup has run once, `AppState.isRegistered` is `true` and the app skips the setup form on future launches (it still shows the mode buttons and on-screen log). A small **Edit profile** button lets a returning user change their stored **name** and **language** at any time; saving profile changes updates both `AppState` and the TTS language.
 
 2.4 Returning user behaviour and mode launcher
 - For a saved user (`AppState.isRegistered == true`):
@@ -171,9 +176,9 @@ Flow:
   - Calls `SpeechService.speak(text)`.
 - `_listenOnce()` parses the Vosk result, extracts the plain text, runs it through `_sanitizeRecognizedText` to remove echoes of the app’s own speech, and, if non-empty, appends a `user : ... : time` entry to `_speakLog`.
 - UI shows:
-  - Title "Visual" at the top.
-  - A scrollable list of recent log entries, newest at the top.
-  - If no log yet, shows `_status` or "Visual is running" centered.
+  - Title "VisualEyes" at the top.
+  - By default, a **chat-style log** of recent entries is visible (speech bubbles left/right for app vs user, newest at the top). A "Show text" / "Hide text" toggle button lets a helper hide the log and instead show only the latest `_status` line centered when more privacy is desired.
+  - If no log yet, the central label shows `_status` or "VisualEyes is running".
 
 3. Speech subsystem (SpeechService)
 -----------------------------------
@@ -319,6 +324,7 @@ Usage pattern:
   - `RECORD_AUDIO`
   - `WAKE_LOCK`
   - `FOREGROUND_SERVICE`
+  - `ACCESS_FINE_LOCATION`
 - MainActivity is exported and uses the standard Flutter embedding (`flutterEmbedding = 2`).
 - A `<queries>` section is included to allow text-processing intents used by Flutter engine.
 
@@ -384,12 +390,25 @@ On the mobile side, `AppState.visionEngine` and `visionServerUrl` are reserved f
 
 10. Current limitations and TODOs
 ---------------------------------
-- Speech recognition and TTS are currently **English-only** (`en-IN`), though the Gemini prompt can optionally answer in simple Tamil based on language code.
+- Text-to-Speech fully supports four locales (English `en-IN`, Tamil `ta-IN`, Malayalam `ml-IN`, Hindi `hi-IN`) and will speak all system prompts and Gemini responses in the user’s chosen language. Offline speech recognition is still based on the small English Vosk model and works best when the user speaks simple English commands, regardless of the chosen TTS language.
 - Voice-based speaker verification and enrollment are stubbed in `BackendService`.
 - Exam mode on the mobile side does not yet send detailed control commands; the server is ready to receive `click`, `move`, `type_text`, and `key` messages.
 - OCR (`ocrScreen`) is not yet integrated into a full user-facing flow.
 - No iOS build configuration has been created or tested.
 - Advanced navigation scenarios (precise ATM keypad finger tracking, robust road-crossing assistance with live speed estimation, public kiosk/indoor navigation, etc.) are design goals but not yet fully implemented; current Gemini prompts encourage this behaviour where possible, but results must be treated as assistance, not guaranteed safety.
+
+Additional behaviour added after the multi-language and question-mode update:
+- **Volume button shortcuts**:
+  - Single volume up/down press is passed through to Android and adjusts system volume normally.
+  - Double **volume up**: if a mode (Visual/Road/ATM/Exam/Translate) is running, stops that mode and any ongoing speech; if no mode is running, starts the currently selected mode.
+  - Triple **volume up**: stops the current mode and its speech, advances to the next mode in the fixed order (Visual → Road → ATM → Exam → Translate → Visual), and immediately starts that new mode.
+  - Double **volume down**: stops the current mode and speech and enters **Question mode** – the app listens to a short spoken question, then (if Gemini is available) answers using the last few captured images plus, where possible, the user’s approximate GPS location. When finished, it resumes the previously running mode.
+- **PC/Exam mode exclusivity**:
+  - When Exam/PC mode is active, camera-based guidance modes (Visual/Road/ATM) and Translate mode cannot be started; attempting to start them produces a spoken reminder to exit Exam mode first.
+  - Entering Exam mode automatically stops any active guidance mode and camera capture.
+- **Last 4 image context buffer**:
+  - While guidance modes are running, each captured frame and its description are stored in an in-memory ring buffer of up to 4 entries. Older image files are deleted from storage when they leave this buffer.
+  - Question mode uses this buffer when answering questions like "what is that phone model from the previous image?" by sending these recent frames together with the spoken question to Gemini.
 
 This document reflects the state of the project after integrating:
 - Offline Vosk small model for speech recognition.

@@ -24,8 +24,8 @@ This file contains the original problem statement and design notes for the Visua
 - **Initial setup (manual)**:
   - Instead of relying on a fragile voice-only onboarding, the current app shows a simple setup section at the top of the Home screen.
   - A text field labelled "Name" lets the user (or a sighted helper) type the user’s name.
-  - A small "Language" label with a dropdown currently exposes English (India, `en-IN`) and can be extended with more language codes later.
-  - When the user taps **Save and continue**, the app stores the profile via `AppState.saveUser` and says "Setup complete. You can now choose a mode."
+  - A small "Language" label with a dropdown now exposes four options: English (`en-IN`), Tamil (`ta-IN`), Malayalam (`ml-IN`), and Hindi (`hi-IN`). The chosen language is used for Text-to-Speech output and to steer Gemini prompts so that online responses are spoken back in that language when possible (offline Vosk speech recognition remains English-only for now).
+  - When the user taps **Save and continue**, the app stores the profile via `AppState.saveUser` and says "Setup complete. You can now choose a mode." A separate **Edit profile** button lets returning users change their name and language at any time from the Home screen.
 - **Mode launcher (buttons)**:
   - After setup (or for returning users), the app greets the user and shows four prominent buttons below the title:
     - **Visual mode** – general visual guidance for everyday surroundings.
@@ -46,6 +46,7 @@ This file contains the original problem statement and design notes for the Visua
   - Normal spoken lines begin with `visual : ...`, recognized user speech begins with `user : ...`, and internal debug lines (such as Gemini quota errors) begin with `visual (debug) : ...` and are **not** spoken.
   - Recent changes also added echo filtering so that the app’s own spoken descriptions (for example, "I see something on your left, very close, within half a meter") are not mis-recognized and logged as `user : ...` entries.
   - Visual guidance now suppresses repeated descriptions for the same position+distance for about 20 seconds, so if an object is continuously in view at the same location and distance, the app will not keep re-speaking the same guidance every 5 seconds.
+  - By default, the chat-style log is **visible** on screen; a "Show text" / "Hide text" toggle lets a helper hide the text completely when not needed and show only the current status line.
 
 - **Planned Local AI server (future free alternative)**:
   - In addition to on-device ML Kit and optional Gemini 2.0 Flash, the design includes a future **Local AI server** that runs on a Windows or Linux machine on the same Wi‑Fi network as the phone.
@@ -59,6 +60,13 @@ This file contains the original problem statement and design notes for the Visua
   - **ATM / public kiosk guidance** – using the camera to understand screen layout, keypads, and, where possible, the user’s finger position, then giving step-by-step instructions like "move your finger a little left / right / up / down".
   - **Road crossing safety** – describing traffic lights or signals, the presence and approximate speed of vehicles (stopped / slow / fast), and warning when crossing might not be safe.
   - **Kiosks, forms, and complex dashboards** – longer-term goal to assist with inaccessible UIs, banking/trading dashboards, ticketing kiosks, etc.
+
+- **Hardware button shortcuts and question mode** (current implementation):
+  - Single volume up/down press is passed through to Android and simply adjusts system volume.
+  - Double volume up toggles the currently selected mode: if Visual/Road/ATM/Exam/Translate is running, it stops that mode and its speech; if no mode is running, it starts the selected mode.
+  - Triple volume up stops the current mode (and its TTS), advances to the next mode in a fixed order (Visual → Road → ATM → Exam → Translate → Visual), and immediately starts that mode.
+  - Double volume down stops the current mode and speech and enters a **question mode**: the app listens for a spoken question, then (if a Gemini API key is configured) answers using the last few camera frames plus, where possible, the user’s approximate GPS location. After answering, the app automatically resumes the previously running mode.
+  - Camera-based guidance modes (Visual/Road/ATM) and Translate mode are blocked while Exam/PC mode is active; the user must first exit Exam mode (for example with the on-screen button or a double-press of volume up while Exam is selected) before using these other modes.
 
 The rest of this file preserves the original requirement text and previous discussions for reference.
 

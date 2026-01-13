@@ -204,15 +204,22 @@ class BackendService {
       return '';
     }
 
+    String targetHint;
+    if (targetLanguageCode.startsWith('ta')) {
+      targetHint = 'Tamil';
+    } else if (targetLanguageCode.startsWith('ml')) {
+      targetHint = 'Malayalam';
+    } else if (targetLanguageCode.startsWith('hi')) {
+      targetHint = 'Hindi';
+    } else {
+      targetHint = 'simple English';
+    }
+
     try {
       final model = genai.GenerativeModel(
         model: AppConfig.geminiVisionModel,
         apiKey: apiKey,
       );
-
-      final targetHint = targetLanguageCode.startsWith('ta')
-          ? 'Tamil'
-          : 'simple English';
 
       final prompt =
           'You are assisting a blind user. Detect the language of the following sentence and translate it into $targetHint. '
@@ -250,14 +257,22 @@ class BackendService {
       return '';
     }
 
+    String languageHint;
+    if (languageCode.startsWith('ta')) {
+      languageHint = 'Answer in 1 or 2 short sentences in simple Tamil.';
+    } else if (languageCode.startsWith('ml')) {
+      languageHint = 'Answer in 1 or 2 short sentences in simple Malayalam.';
+    } else if (languageCode.startsWith('hi')) {
+      languageHint = 'Answer in 1 or 2 short sentences in simple Hindi.';
+    } else {
+      languageHint = 'Answer in 1 or 2 short sentences in simple English.';
+    }
+
     try {
       final model = genai.GenerativeModel(
         model: AppConfig.geminiVisionModel,
         apiKey: apiKey,
       );
-      final languageHint = languageCode.startsWith('ta')
-          ? 'Answer in 1 or 2 short sentences in simple Tamil.'
-          : 'Answer in 1 or 2 short sentences in simple English.';
       final prompt =
           'A blind user is asking what a "${info.label}" is usually used for. '
           'Explain the typical purpose of this object. $languageHint';
@@ -380,9 +395,16 @@ class BackendService {
 
       final bytes = await file.readAsBytes();
 
-      final languageHint = languageCode.startsWith('ta')
-          ? 'Answer in short, simple Tamil sentences.'
-          : 'Answer in short, simple English sentences.';
+      String languageHint;
+      if (languageCode.startsWith('ta')) {
+        languageHint = 'Answer in short, simple Tamil sentences.';
+      } else if (languageCode.startsWith('ml')) {
+        languageHint = 'Answer in short, simple Malayalam sentences.';
+      } else if (languageCode.startsWith('hi')) {
+        languageHint = 'Answer in short, simple Hindi sentences.';
+      } else {
+        languageHint = 'Answer in short, simple English sentences.';
+      }
 
       final prompt =
           'You are assisting a blind user in real time. Carefully look at the whole scene and describe it in detail. '
@@ -404,6 +426,76 @@ class BackendService {
     } catch (e) {
       _lastGeminiError = e.toString();
       // On any error (network, quota, etc.), fall back to on-device path.
+      return '';
+    }
+  }
+
+  Future<String> answerQuestionWithGemini({
+    required String question,
+    required String languageCode,
+    required List<String> imagePaths,
+    double? latitude,
+    double? longitude,
+  }) async {
+    final apiKey = AppConfig.geminiApiKey;
+    if (apiKey.isEmpty) {
+      return '';
+    }
+
+    final trimmedQuestion = question.trim();
+    if (trimmedQuestion.isEmpty) {
+      return '';
+    }
+
+    try {
+      final model = genai.GenerativeModel(
+        model: AppConfig.geminiVisionModel,
+        apiKey: apiKey,
+      );
+
+      String languageHint;
+      if (languageCode.startsWith('ta')) {
+        languageHint = 'Answer in short, simple Tamil sentences.';
+      } else if (languageCode.startsWith('ml')) {
+        languageHint = 'Answer in short, simple Malayalam sentences.';
+      } else if (languageCode.startsWith('hi')) {
+        languageHint = 'Answer in short, simple Hindi sentences.';
+      } else {
+        languageHint = 'Answer in short, simple English sentences.';
+      }
+
+      final contents = <genai.Content>[];
+
+      final buffer = StringBuffer();
+      buffer.writeln(
+          'You are assisting a blind user who previously received a few image descriptions.');
+      buffer.writeln(
+          'Use the images (if provided), the user\'s question, and general knowledge to answer clearly.');
+      if (latitude != null && longitude != null) {
+        buffer.writeln(
+            'The user\'s approximate GPS location is: latitude $latitude, longitude $longitude.');
+        buffer.writeln(
+            'If the question is about distances, travel time, or nearby places, take this location into account.');
+      }
+      buffer.writeln(languageHint);
+      buffer.writeln(
+          'Always speak as if you are talking directly to the user. Avoid long paragraphs and technical details.');
+      buffer.writeln('User question: "$trimmedQuestion"');
+
+      contents.add(genai.Content.text(buffer.toString()));
+
+      for (final path in imagePaths) {
+        final file = File(path);
+        if (await file.exists()) {
+          final bytes = await file.readAsBytes();
+          contents.add(genai.Content.data('image/jpeg', bytes));
+        }
+      }
+
+      final response = await model.generateContent(contents);
+      final text = response.text ?? '';
+      return text.trim();
+    } catch (_) {
       return '';
     }
   }
